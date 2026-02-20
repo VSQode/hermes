@@ -1,6 +1,6 @@
 "use strict";
 /**
- * hermes v0.2.0 — Mid-stream and idle agent message injection
+ * hermes v0.3.0 — Mid-stream and idle agent message injection
  *
  * Watches an inbox folder for .msg files and dispatches their content into
  * the VS Code Copilot Chat panel.
@@ -9,10 +9,12 @@
  *   {sessionId}|{mode}|{message}
  *
  * Modes:
- *   send   — dispatch when agent is idle (send button available). Same as v0.1.0.
- *            Writes {basename}.ack on success; {basename}.err on failure.
- *   steer  — reserved for Phase 2 (mid-stream steering).
- *   queue  — reserved for Phase 3 (queued dispatch).
+ *   send          — dispatch when agent is idle (acceptInput, silently fails if running).
+ *   steer         — cancel any running request then send. Safe no-op when idle.
+ *                   VS Code source (Feb 2026) has no steer/queue command, so best-effort:
+ *                   cancel (no-op if idle) + 250ms + send.
+ *   stop-and-send — explicit cancel + 300ms + send. Same semantics as steer.
+ *   queue         — reserved for Phase 3 (queued dispatch).
  *
  * File lifecycle:
  *   1. Caller writes:  inbox/{uuid}.msg  with content above
@@ -20,7 +22,7 @@
  *      a. success → writes inbox/{uuid}.ack, deletes inbox/{uuid}.msg
  *      b. failure → writes inbox/{uuid}.err (reason string), deletes inbox/{uuid}.msg
  *
- * Implements VSQode/hermes#1 (Phase 1: adopt VGM9 prototype, establish baseline).
+ * Implements VSQode/hermes#2 (Phase 2: steer mode + stop-and-send).
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
@@ -29,6 +31,8 @@ const vscode = require("vscode");
 const fs = require("fs");
 const path = require("path");
 let watcher;
+/** Promisified delay. */
+const _delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 function activate(context) {
     console.log('[HERMES] Activated');
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -92,10 +96,33 @@ function activate(context) {
                 console.log('[HERMES] Sent (mode=send) to session', sessionId.substring(0, 8));
             }
             else if (mode === 'steer') {
-                // Phase 2: mid-stream steering — not yet implemented.
-                const reason = 'mode=steer: not implemented (Phase 2)';
-                console.warn('[HERMES]', reason);
-                _cleanup(errFile, reason);
+                // Phase 2: cancel any in-progress request + wait + send.
+                // VS Code (Feb 2026) has no native steer/queue command.
+                // CancelAction calls cancelCurrentRequestForSession — safe no-op when idle.
+                // workbench.action.chat.open with isPartialQuery=false calls acceptInput();
+                // it returns void when running, so cancel first guarantees delivery.
+                await vscode.commands.executeCommand('workbench.action.chat.cancel');
+                await _delay(250);
+                await vscode.commands.executeCommand('workbench.action.chat.open', {
+                    query: message,
+                    isPartialQuery: false,
+                });
+                const steerAck = `steered (cancel+250ms+send) sessionId=${sessionId.substring(0, 8)}... at ${new Date().toISOString()}`;
+                _cleanup(ackFile, steerAck);
+                console.log('[HERMES] Steered (mode=steer) to session', sessionId.substring(0, 8));
+            }
+            else if (mode === 'stop-and-send') {
+                // Explicit cancel-then-send. Same as steer but with a longer delay
+                // (300ms) and unambiguous naming for callers that want to be explicit.
+                await vscode.commands.executeCommand('workbench.action.chat.cancel');
+                await _delay(300);
+                await vscode.commands.executeCommand('workbench.action.chat.open', {
+                    query: message,
+                    isPartialQuery: false,
+                });
+                const sasAck = `stop-and-send sessionId=${sessionId.substring(0, 8)}... at ${new Date().toISOString()}`;
+                _cleanup(ackFile, sasAck);
+                console.log('[HERMES] Stop-and-send to session', sessionId.substring(0, 8));
             }
             else if (mode === 'queue') {
                 // Phase 3: queued dispatch — not yet implemented.
@@ -105,7 +132,7 @@ function activate(context) {
             }
             else {
                 // Unknown mode — write .err, do not crash.
-                const reason = `Unknown mode="${mode}" — supported modes: send, steer (Phase 2), queue (Phase 3)`;
+                const reason = `Unknown mode="${mode}" — supported modes: send, steer, stop-and-send, queue (Phase 3)`;
                 console.error('[HERMES]', reason);
                 _cleanup(errFile, reason);
             }
