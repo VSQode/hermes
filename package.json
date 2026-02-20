@@ -1,12 +1,18 @@
 {
   "name": "hermes",
+  "displayName": "Hermes",
   "version": "0.2.0",
   "description": "Mid-stream and idle agent message injection for VS Code Copilot Chat",
+  "publisher": "vgm9",
+  "categories": ["Other"],
   "engines": { "vscode": "^1.96.0" },
+  "main": "./out/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {},
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "vsce package --allow-missing-repository"
   },
   "devDependencies": {
     "@types/node": "^16.x",
